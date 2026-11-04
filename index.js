@@ -1,25 +1,21 @@
 const express = require("express");
-const admin = require("firebase-admin");
-
-if (!admin.apps.length) {
-  admin.initializeApp({
-    databaseURL: "https://tuannghean-default-rtdb.firebaseio.com"
-  });
-}
+const axios = require("axios");
 
 const app = express();
 app.use(express.json());
 
-// Endpoint kiểm tra nhanh
+const FIREBASE_URL = "https://tuannghean-default-rtdb.firebaseio.com/bbhouse_data.json";
+
+// Endpoint kiểm tra
 app.get("/webhook", (req, res) => {
   res.status(200).send("Sepay Bridge Server is RUNNING OK!");
 });
 
 app.post("/webhook", (req, res) => {
-  // 1. TRẢ LỜI SEPAY NGAY LẬP TỨC ĐỂ KHÔNG BỊ TIMEOUT 15 GIÂY
+  // 1. Phản hồi SePAY ngay lập tức
   res.status(200).json({ success: true, message: "Received by bridge" });
 
-  // 2. XỬ LÝ GẠCH NỢ CHẠY NGẦM PHÍA SAU
+  // 2. Chạy ngầm gạch nợ qua REST API
   (async () => {
     try {
       console.log("==> PAYLOAD SEPAY:", JSON.stringify(req.body));
@@ -28,11 +24,14 @@ app.post("/webhook", (req, res) => {
 
       if (!content) return;
 
-      const db = admin.database();
-      const snapshot = await db.ref("bbhouse_data").once("value");
-      const appData = snapshot.val();
+      // Lấy dữ liệu từ Firebase
+      const response = await axios.get(FIREBASE_URL);
+      const appData = response.data;
 
-      if (!appData || !Array.isArray(appData.rooms)) return;
+      if (!appData || !Array.isArray(appData.rooms)) {
+        console.log("==> Không tìm thấy danh sách phòng trong Firebase");
+        return;
+      }
 
       const cleanContent = content.toUpperCase().replace(/[\s\-_]/g, "");
       let matchedRoom = null;
@@ -42,9 +41,8 @@ app.post("/webhook", (req, res) => {
         const rName = (r.name || "").toString().toUpperCase().replace(/[\s\-_]/g, "");
 
         if (
-          (rId && cleanContent.includes("BB36" + rId)) ||
-          (rName && cleanContent.includes("BB36" + rName)) ||
-          (rId && cleanContent.includes(rId))
+          (rId && cleanContent.includes(rId)) ||
+          (rName && cleanContent.includes(rName))
         ) {
           matchedRoom = r;
           break;
@@ -53,18 +51,24 @@ app.post("/webhook", (req, res) => {
 
       if (matchedRoom) {
         matchedRoom.status = "paid";
-        await db.ref("bbhouse_data/rooms").set(appData.rooms);
 
+        // Cập nhật lại danh sách phòng
+        await axios.put("https://tuannghean-default-rtdb.firebaseio.com/bbhouse_data/rooms.json", appData.rooms);
+
+        // Cập nhật bản ghi lịch sử tháng
         const m = appData.billing_month || 9;
         const y = appData.billing_year || 2026;
         const curKey = `${y}_${m}`;
         if (appData.monthly_records && appData.monthly_records[curKey]) {
-          await db.ref(`bbhouse_data/monthly_records/${curKey}`).set(appData.rooms);
+          await axios.put(`https://tuannghean-default-rtdb.firebaseio.com/bbhouse_data/monthly_records/${curKey}.json`, appData.rooms);
         }
+
         console.log(`==> ✓ ĐÃ GẠCH NỢ THÀNH CÔNG CHO: ${matchedRoom.name}`);
+      } else {
+        console.log("==> Không tìm thấy phòng khớp với nội dung CK");
       }
     } catch (err) {
-      console.error("==> Lỗi chạy ngầm:", err.message);
+      console.error("==> Lỗi cập nhật Firebase:", err.message);
     }
   })();
 });
